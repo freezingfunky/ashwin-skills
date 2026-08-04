@@ -29,21 +29,21 @@ Source edited, typecheck green, Fast Refresh quietly stale — source ≠ served
 
 Chats don't sync across tools. Pasting a wall of context is lossy and slow.
 
-**Fix:** [`/dual-tool-handoff`](./skills/dual-tool-handoff/SKILL.md) — write a short handoff into the repo (opt-in); the other tool reads the file and continues.
+**Fix:** [`/dual-tool-handoff`](./skills/dual-tool-handoff/SKILL.md) — named thread-summary handoff in the repo (opt-in); for **switching** tools, not keeping two sessions in sync. Other tool resumes by name or via `LATEST`.
 
 ### #3: The agent can do everything — so it does nothing reliably.
 
 Flaky agents are usually missing Task · Context · Memory · Eval, often wrapped around *multiple* outcomes.
 
-**Fix:** [`/agent-design`](./skills/agent-design/SKILL.md) — decision-map forces a **singular outcome** (or splits into separate agents and re-enters); then lock the four pillars on purpose.
+**Fix:** [`/agent-design`](./skills/agent-design/SKILL.md) — decision-map forces a **singular outcome** (or splits and optionally fans out in parallel after confirm); then lock the four pillars on purpose.
 
 ## Skills
 
 | Skill | Job |
 |---|---|
 | **[render-check](./skills/render-check/SKILL.md)** | Prove served HTML/CSS changed before calling a UI fix done |
-| **[dual-tool-handoff](./skills/dual-tool-handoff/SKILL.md)** | Opt-in Cursor ↔ Claude Code handoff via `.scratch/handoffs/LATEST.md` |
-| **[agent-design](./skills/agent-design/SKILL.md)** | Decision-map → singular outcome → Task · Context · Memory · Eval |
+| **[dual-tool-handoff](./skills/dual-tool-handoff/SKILL.md)** | Named, switch-only Cursor ↔ Claude Code handoff |
+| **[agent-design](./skills/agent-design/SKILL.md)** | Decision-map → singular outcome → pillars (optional parallel fan-out) |
 
 ## License
 

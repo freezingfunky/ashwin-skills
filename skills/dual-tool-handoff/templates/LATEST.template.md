@@ -2,8 +2,10 @@
 
 ## Meta
 
+- **Name:** (short thread summary — same string both tools quote)
+- **Slug:** `(kebab-case)`
 - **When:** (ISO or local datetime)
-- **Tool:** cursor | claude-code | other
+- **Tool (leaving):** cursor | claude-code | other
 - **Branch:** `(branch)`
 - **Worktree:** main checkout | path
 - **Ticket:** path or n/a
@@ -39,4 +41,4 @@
 
 ## Resume one-liner
 
-> Continue from `(ticket)` on branch `(branch)`. Spec is `(spec)`. Don't reopen closed decisions.
+> Resume handoff **(Name)** (`slug`) from `(ticket)` on branch `(branch)`. Spec is `(spec)`. Don't reopen closed decisions.
