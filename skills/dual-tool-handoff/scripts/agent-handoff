@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Write / refresh a dual-tool agent handoff file (Cursor ↔ Claude Code, etc.).
+# Usage:
+#   agent-handoff \
+#     --tool cursor \
+#     --ticket path/or/n/a \
+#     --spec path/or/n/a \
+#     --shipped "What this session completed" \
+#     --left "Remaining work" \
+#     --gates "none,qa" \
+#     --questions "none"
+#
+# Always writes (in the current git repo):
+#   .scratch/handoffs/LATEST.md
+#   .scratch/handoffs/YYYY-MM-DD-HHMM-<branch-slug>.md
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT"
+
+TOOL="unknown"
+TICKET="n/a"
+SPEC="n/a"
+SHIPPED=""
+LEFT=""
+GATES="none"
+QUESTIONS="none"
+WORKTREE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tool) TOOL="${2:-unknown}"; shift 2 ;;
+    --ticket) TICKET="${2:-n/a}"; shift 2 ;;
+    --spec) SPEC="${2:-n/a}"; shift 2 ;;
+    --shipped) SHIPPED="${2:-}"; shift 2 ;;
+    --left) LEFT="${2:-}"; shift 2 ;;
+    --gates) GATES="${2:-none}"; shift 2 ;;
+    --questions) QUESTIONS="${2:-none}"; shift 2 ;;
+    --worktree) WORKTREE="${2:-}"; shift 2 ;;
+    -h|--help)
+      sed -n '2,16p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+BRANCH="$(git branch --show-current 2>/dev/null || echo unknown)"
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+if [[ -z "$WORKTREE" ]]; then
+  if [[ "$GIT_DIR" == *"/worktrees/"* ]] || [[ "$ROOT" == *"/worktrees/"* ]]; then
+    WORKTREE="$ROOT"
+  else
+    WORKTREE="main checkout"
+  fi
+fi
+
+WHEN="$(date '+%Y-%m-%d %H:%M')"
+STAMP="$(date '+%Y-%m-%d-%H%M')"
+BRANCH_SLUG="$(echo "$BRANCH" | tr '/:' '--' | tr -cd '[:alnum:]._-' | cut -c1-48)"
+DIR="$ROOT/.scratch/handoffs"
+mkdir -p "$DIR"
+
+DIRTY="$(git status --porcelain 2>/dev/null | head -40 || true)"
+if [[ -z "$SHIPPED" ]]; then
+  SHIPPED="(fill in — what this session completed)"
+fi
+if [[ -z "$LEFT" ]]; then
+  LEFT="(fill in — remaining work)"
+fi
+
+# Build checkbox list from comma-separated --gates (default: none)
+GATES_BLOCK=""
+IFS=',' read -r -a GATE_ARR <<< "$GATES"
+for g in "${GATE_ARR[@]}"; do
+  g="$(echo "$g" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$g" ]] && continue
+  GATES_BLOCK+="- [x] $g"$'\n'
+done
+if [[ -z "$GATES_BLOCK" ]]; then
+  GATES_BLOCK="- [x] none"$'\n'
+fi
+
+if [[ -z "$DIRTY" ]]; then
+  DIRTY_BLOCK="(clean)"
+else
+  DIRTY_BLOCK="$DIRTY"
+fi
+
+LATEST="$DIR/LATEST.md"
+DATED="$DIR/${STAMP}-${BRANCH_SLUG}.md"
+
+export AH_WHEN="$WHEN" AH_TOOL="$TOOL" AH_BRANCH="$BRANCH" AH_WORKTREE="$WORKTREE"
+export AH_TICKET="$TICKET" AH_SPEC="$SPEC" AH_SHIPPED="$SHIPPED" AH_LEFT="$LEFT"
+export AH_QUESTIONS="$QUESTIONS" AH_GATES_BLOCK="$GATES_BLOCK" AH_DIRTY="$DIRTY_BLOCK"
+
+python3 - "$LATEST" <<'PY'
+import pathlib, sys, os
+from string import Template
+
+out = pathlib.Path(sys.argv[1])
+env = os.environ
+
+def g(k, default=""):
+    return env.get(k, default)
+
+body = Template(
+    """# Agent handoff
+
+## Meta
+
+- **When:** $AH_WHEN
+- **Tool:** $AH_TOOL
+- **Branch:** `$AH_BRANCH`
+- **Worktree:** $AH_WORKTREE
+- **Ticket:** $AH_TICKET
+- **Spec:** $AH_SPEC
+
+## What shipped
+
+- $AH_SHIPPED
+
+## What's left
+
+- $AH_LEFT
+
+## Flags / migrations
+
+- Flag: (fill or n/a)
+- Migration: (fill or n/a)
+
+## Ready for gates
+
+$AH_GATES_BLOCK
+## Open questions
+
+- $AH_QUESTIONS
+
+## Working tree (auto)
+
+```
+$AH_DIRTY
+```
+
+## Resume one-liner
+
+> Continue from `$AH_TICKET` on branch `$AH_BRANCH`. Spec is `$AH_SPEC`. Don't reopen closed decisions.
+"""
+).safe_substitute(
+    AH_WHEN=g("AH_WHEN"),
+    AH_TOOL=g("AH_TOOL"),
+    AH_BRANCH=g("AH_BRANCH"),
+    AH_WORKTREE=g("AH_WORKTREE"),
+    AH_TICKET=g("AH_TICKET"),
+    AH_SPEC=g("AH_SPEC"),
+    AH_SHIPPED=g("AH_SHIPPED"),
+    AH_LEFT=g("AH_LEFT"),
+    AH_GATES_BLOCK=g("AH_GATES_BLOCK"),
+    AH_QUESTIONS=g("AH_QUESTIONS"),
+    AH_DIRTY=g("AH_DIRTY", "(clean)"),
+)
+out.write_text(body, encoding="utf-8")
+PY
+
+cp "$LATEST" "$DATED"
+
+echo "Wrote $LATEST"
+echo "Wrote $DATED"
+echo ""
+echo "Resume one-liner:"
+echo "Continue from $TICKET on branch $BRANCH. Spec is $SPEC. Don't reopen closed decisions."
