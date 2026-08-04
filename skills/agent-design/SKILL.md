@@ -2,12 +2,10 @@
 name: agent-design
 description: >
   How to build an AI agent that actually works — start with a decision-map that forces a
-  singular outcome (or splits into multiple agents), then lock Task · Context · Memory · Eval.
+  singular outcome (or splits into multiple agents), design one in-session, then optionally
+  fan out parked agents in parallel after confirm. Locks Task · Context · Memory · Eval.
   Use when designing, building, reviewing, or debugging an LLM agent, subagent, tool-using
-  assistant, or skill: scoping what one agent should do, deciding what context it gets,
-  designing memory across runs, safe write authority, or why an agent is flaky. Turns
-  "good at building agents by feel" into "good on purpose, every time." For the fill-in
-  template see reference/agent-spec-template.md.
+  assistant, or skill. For the fill-in template see reference/agent-spec-template.md.
 ---
 
 # Agent design — decision map, then four pillars
@@ -20,13 +18,13 @@ A working agent is four things, and a weak agent is usually missing one:
 > **Task · Context · Memory · Eval.**
 
 But first: **one agent = one outcome.** If you can name two outcomes that succeed or
-fail independently, you have two agents — run this skill once per agent.
+fail independently, you have two agents — each gets its own design pass.
 
 ## 0. Decision map — singular outcome or split
 
 Do this **before** filling the pillars. Completion criterion: either (a) one singular
-DONE/FAILED pair locked, or (b) an explicit split list of agents each with their own DONE,
-and this session continues with only one of them.
+DONE/FAILED pair locked, or (b) an explicit split list, **this session designs one**, and
+parked agents are either fan-out-spawned after confirm or left for later re-entry.
 
 ### Steps
 
@@ -37,14 +35,56 @@ and this session continues with only one of them.
    - Independent success/fail → **split** into a separate agent name + its DONE.
 4. **Emit one of:**
    - **One agent** — proceed to pillars below for that outcome.
-   - **Multiple agents** — list them; **park** all but one; tell the user to re-enter
-     `/agent-design` for each parked agent in its own session. Do **not** auto-spawn
-     agents without confirm.
+   - **Multiple agents** — print the full split table (name · DONE · FAILED). Pick
+     **one** to design in this session (recommend the dependency-root). **Park** the rest.
+     Then run **§0b Fan-out** before or while continuing pillars for the in-session agent.
 5. **Fog vs size:**
    - One outcome, still foggy (open decisions) → stay in the decision map; resolve
      open questions one at a time until the outcome is sharp.
    - One outcome, too big for one run → still **one** agent design; use handoff/memory
      across runs — do **not** invent a second agent unless the outcome splits.
+
+### 0b. Fan-out (parked agents → parallel sessions)
+
+**Never spawn without an explicit user confirm.** Silent fan-out is a failure mode.
+
+After the split list is on screen, ask **once**:
+
+> Spawn parked agents in parallel now? (yes / no — default no)
+
+#### If **no**
+
+Print the park list with a one-liner each: `Re-enter /agent-design for <name> — DONE: …`
+Continue pillars for the in-session agent only.
+
+#### If **yes**
+
+1. Keep designing the **in-session** agent here (pillars + spec).
+2. For **each parked** agent, launch **one** parallel session whose *only* job is
+   `/agent-design` for that agent — already locked DONE/FAILED, skip re-smell of the
+   parent mega-job, go straight to pillars + spec.
+3. Use whatever launcher this runtime supports (try in order; stop at first that works):
+   - **Cursor:** Task / background subagent — one task per parked agent; prompt must
+     include agent name, DONE, FAILED, and “run agent-design pillars only; write the
+     filled spec to a path the user names (default `.scratch/agent-design/<name>.md`).”
+   - **Claude Code:** `claude --bg --name "agent-design:<name>" "<prompt as above>"`
+     (or the host’s equivalent background-agent API).
+   - **Neither available:** do not fake parallelism — fall back to the park list and
+     tell the user the runtime can’t spawn; they re-enter manually.
+4. Report back: table of parked agent → session id / job name / output path (or “queued”).
+5. Each parallel session must produce its own filled `reference/agent-spec-template.md`
+   (or the agreed path). Do **not** merge specs into one mega-doc.
+
+**Prompt template for each spawned session:**
+
+```
+Run /agent-design for agent "<name>" only.
+DONE when: <…>
+FAILED when: <…>
+Parent split context (read-only): <one-line list of sibling agents>.
+Skip mega-job smell test; pillars + filled spec only.
+Write the completed spec to .scratch/agent-design/<name>.md
+```
 
 ### When *not* to use this skill
 
@@ -56,9 +96,12 @@ and this session continues with only one of them.
 
 ### Failure modes
 
-- **Mega-agent:** multiple DONEs in one spec → split and re-enter.
+- **Mega-agent:** multiple DONEs in one spec → split, then fan-out or re-enter.
 - **Premature pillars:** filling Task before the smell test → rewind to step 3.
-- **Silent fan-out:** spawning subagents without listing parked agents → always surface the list.
+- **Silent fan-out:** spawning without listing the split and getting **yes** → always
+  surface the list and wait for confirm.
+- **Fake parallelism:** claiming sessions launched when no Task/`claude --bg`/equivalent
+  ran → say so and fall back to park list.
 
 ## 1. Task — one job, with a bright line for *done* and *failed*
 
@@ -111,7 +154,8 @@ An agent without an eval is a vibe; an agent with one is a system.
 ## The fix for "good by feel"
 
 1. Run the **decision map** (section 0) until you have one outcome (or a split list).
-2. Fill the agent spec + pre-flight checklist in `reference/agent-spec-template.md`.
+2. On a split: design one here; **confirm** before fan-out (§0b).
+3. Fill the agent spec + pre-flight checklist in `reference/agent-spec-template.md`.
 
 ## Worked example (product-agnostic)
 
@@ -119,8 +163,12 @@ User wants: "an agent that intakes support tickets, drafts a reply, and posts to
 
 Decision map smell test:
 
-- Intake parse → DONE: structured ticket object
-- Draft reply → DONE: draft text meeting tone rubric  
-- Post to Slack → DONE: message posted  
+| Agent | DONE |
+|---|---|
+| ticket-intake | structured ticket object |
+| reply-drafter | draft meeting tone rubric |
+| slack-poster | message posted (propose→confirm) |
 
-Independent DONEs → **three agents** (or intake+draft as one if they share one DONE, Slack as propose-confirm mutator). This session designs **ticket-intake** only; park `reply-drafter` and `slack-poster` for later `/agent-design` runs.
+Independent DONEs → three agents. This session designs **ticket-intake**. Ask:
+“Spawn `reply-drafter` and `slack-poster` in parallel now?” — on **yes**, launch two
+background sessions with the prompt template; on **no**, print the park list.

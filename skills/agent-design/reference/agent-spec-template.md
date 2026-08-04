@@ -16,6 +16,9 @@ AGENT: <name — one job in the name if you can>
    - Smell test: any aspect with an independent DONE/FAILED?
        - No → one agent (continue)
        - Yes → SPLIT list (name + DONE each); this session designs only:
+   - Fan-out parked agents in parallel? Y/N (default N):
+       - If Y: launcher used + session ids / output paths:
+       - If N: park one-liners for re-entry:
    - Open questions still foggy (or "none"):
    - Ready to spec pillars? Y/N
 
