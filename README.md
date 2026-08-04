@@ -1,6 +1,6 @@
 # Ashwin Skills
 
-[![skills.sh](https://skills.sh/b/freezingfunky/ashwin-skills)](https://skills.sh/freezingfunky/ashwin-skills)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Agent skills I use every day to ship real product — not vibe coding. Small, composable, born from failure modes in Cursor + Claude Code.
 
