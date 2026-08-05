@@ -17,6 +17,9 @@
 #   .scratch/handoffs/<slug>.md          # canonical named handoff
 #   .scratch/handoffs/LATEST.md          # current switch target (copy)
 #   .scratch/handoffs/<stamp>-<slug>.md  # immutable snapshot
+#
+# Diff check: script fills Tree + Paths (cap 40). Agent fills Alignment + Note.
+# warn ≠ block — script never refuses to write.
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -31,6 +34,7 @@ LEFT=""
 GATES="none"
 QUESTIONS="none"
 WORKTREE=""
+PATH_CAP=40
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     --questions) QUESTIONS="${2:-none}"; shift 2 ;;
     --worktree) WORKTREE="${2:-}"; shift 2 ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,24p' "$0"
       exit 0
       ;;
     *)
@@ -61,7 +65,6 @@ if [[ -z "$LEFT" ]]; then
   LEFT="(fill in — remaining work)"
 fi
 
-# Derive --name from shipped/left if omitted
 if [[ -z "$NAME" ]]; then
   if [[ "$SHIPPED" != "(fill in — what this session completed)" ]]; then
     NAME="$SHIPPED"
@@ -73,7 +76,6 @@ if [[ -z "$NAME" ]]; then
   fi
 fi
 
-# slug: lowercase, spaces/punct → hyphen, alnum+hyphen only, max 48
 SLUG="$(
   echo "$NAME" \
     | tr '[:upper:]' '[:lower:]' \
@@ -102,6 +104,31 @@ mkdir -p "$DIR"
 
 DIRTY="$(git status --porcelain 2>/dev/null | head -40 || true)"
 
+# Path set: porcelain + unstaged + staged (unique, sorted). Not last-commit-only.
+PATHS_RAW="$(
+  {
+    git status --porcelain 2>/dev/null | sed -E 's/^...//' | sed 's/^"//;s/"$//'
+    git diff --name-only 2>/dev/null
+    git diff --cached --name-only 2>/dev/null
+  } | sed '/^$/d' | sort -u
+)"
+PATH_TOTAL=0
+if [[ -n "$PATHS_RAW" ]]; then
+  PATH_TOTAL="$(printf '%s\n' "$PATHS_RAW" | wc -l | tr -d ' ')"
+fi
+
+if [[ "$PATH_TOTAL" -eq 0 ]]; then
+  TREE_STATE="clean"
+  PATHS_BLOCK="  - (none)"
+else
+  TREE_STATE="dirty"
+  PATHS_BLOCK="$(printf '%s\n' "$PATHS_RAW" | head -n "$PATH_CAP" | sed 's/^/  - /')"
+  if [[ "$PATH_TOTAL" -gt "$PATH_CAP" ]]; then
+    MORE=$((PATH_TOTAL - PATH_CAP))
+    PATHS_BLOCK+=$'\n'"  - …and ${MORE} more"
+  fi
+fi
+
 GATES_BLOCK=""
 IFS=',' read -r -a GATE_ARR <<< "$GATES"
 for g in "${GATE_ARR[@]}"; do
@@ -127,6 +154,7 @@ export AH_WHEN="$WHEN" AH_TOOL="$TOOL" AH_BRANCH="$BRANCH" AH_WORKTREE="$WORKTRE
 export AH_TICKET="$TICKET" AH_SPEC="$SPEC" AH_SHIPPED="$SHIPPED" AH_LEFT="$LEFT"
 export AH_QUESTIONS="$QUESTIONS" AH_GATES_BLOCK="$GATES_BLOCK" AH_DIRTY="$DIRTY_BLOCK"
 export AH_NAME="$NAME" AH_SLUG="$SLUG"
+export AH_TREE="$TREE_STATE" AH_PATHS_BLOCK="$PATHS_BLOCK"
 
 python3 - "$NAMED" <<'PY'
 import pathlib, sys, os
@@ -159,6 +187,14 @@ body = Template(
 ## What's left
 
 - $AH_LEFT
+
+## Diff check
+
+- **Tree:** $AH_TREE
+- **Paths (script):**
+$AH_PATHS_BLOCK
+- **Alignment (agent):** (fill ok|warn)
+- **Note (agent):** (fill — required if warn)
 
 ## Flags / migrations
 
@@ -193,6 +229,8 @@ $AH_DIRTY
     AH_SPEC=g("AH_SPEC"),
     AH_SHIPPED=g("AH_SHIPPED"),
     AH_LEFT=g("AH_LEFT"),
+    AH_TREE=g("AH_TREE"),
+    AH_PATHS_BLOCK=g("AH_PATHS_BLOCK"),
     AH_GATES_BLOCK=g("AH_GATES_BLOCK"),
     AH_QUESTIONS=g("AH_QUESTIONS"),
     AH_DIRTY=g("AH_DIRTY", "(clean)"),
@@ -206,6 +244,12 @@ cp "$NAMED" "$DATED"
 echo "Wrote $NAMED  (canonical — resume by name)"
 echo "Wrote $LATEST (current switch target)"
 echo "Wrote $DATED  (snapshot)"
+echo ""
+echo "Diff check: Tree=$TREE_STATE paths=$PATH_TOTAL"
+if [[ "$TREE_STATE" == "clean" ]]; then
+  echo "Diff check: clean tree — agent should warn if shipped claims code landed"
+fi
+echo "Diff check: agent must fill Alignment (ok|warn) + Note (required if warn). warn ≠ block."
 echo ""
 echo "Name:  $NAME"
 echo "Slug:  $SLUG"

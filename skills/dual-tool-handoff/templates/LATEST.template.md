@@ -19,6 +19,14 @@
 
 - (remaining work)
 
+## Diff check
+
+- **Tree:** dirty | clean
+- **Paths (script):**
+  - (none)
+- **Alignment (agent):** ok | warn
+- **Note (agent):** (required if warn)
+
 ## Flags / migrations
 
 - Flag: n/a
