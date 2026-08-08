@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Compat wrapper — prefer session-resolve --from claude
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec "$ROOT/session-resolve" --from claude "$@"

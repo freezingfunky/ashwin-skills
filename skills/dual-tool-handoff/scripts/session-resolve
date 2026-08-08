@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""List / resolve Claude Code or Cursor sessions for the current git repo.
+
+Usage:
+  session-resolve --from claude|cursor list [--json] [--main-only] [--limit N]
+  session-resolve --from claude|cursor resolve <query> [--json]
+  session-resolve --from claude|cursor resolve --id <id> [--json]
+
+Exit codes: 0 = one match (resolve) or list ok; 2 = none; 3 = many; 1 = usage/error.
+
+Never summarizes, never writes handoffs, never dumps transcript bodies.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def git_toplevel() -> Path:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], text=True
+        ).strip()
+    except subprocess.CalledProcessError:
+        die("error: not inside a git repo")
+    return Path(out).resolve()
+
+
+def encode_claude_slug(path: Path) -> str:
+    s = str(path)
+    for ch in ("/", " ", "."):
+        s = s.replace(ch, "-")
+    return s
+
+
+def iso_from_ms(ms: int | None) -> str:
+    if not ms:
+        return ""
+    try:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+
+def iso_from_iso_or_file(ts: str | None, path: Path) -> str:
+    if ts:
+        return ts
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except OSError:
+        return ""
+
+
+# --- Claude -----------------------------------------------------------------
+
+
+def claude_project_dirs(toplevel: Path, main_only: bool) -> list[Path]:
+    root = Path.home() / ".claude" / "projects"
+    if not root.is_dir():
+        return []
+    slug = encode_claude_slug(toplevel)
+    dirs: list[Path] = []
+    main = root / slug
+    if main.is_dir():
+        dirs.append(main)
+    if not main_only:
+        for p in root.iterdir():
+            if p.is_dir() and p.name.startswith(slug + "--"):
+                dirs.append(p)
+    return dirs
+
+
+def parse_claude_session(path: Path) -> dict[str, Any] | None:
+    """Stream-parse JSONL for confirm-card metadata only."""
+    sid = path.stem
+    title = ""
+    custom = ""
+    ai = ""
+    branch = ""
+    cwd = ""
+    last_ts = ""
+    last_user = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = o.get("type")
+                if t == "custom-title" and o.get("customTitle"):
+                    custom = str(o["customTitle"])
+                elif t == "ai-title" and o.get("aiTitle"):
+                    ai = str(o["aiTitle"])
+                if t in ("user", "assistant", "system", "attachment"):
+                    if o.get("gitBranch"):
+                        branch = str(o["gitBranch"])
+                    if o.get("cwd"):
+                        cwd = str(o["cwd"])
+                    if o.get("timestamp"):
+                        last_ts = str(o["timestamp"])
+                    if t == "user":
+                        msg = o.get("message") or {}
+                        content = msg.get("content") if isinstance(msg, dict) else None
+                        text = ""
+                        if isinstance(content, str):
+                            text = content
+                        elif isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    text = str(part.get("text") or "")
+                                    break
+                                if isinstance(part, str):
+                                    text = part
+                                    break
+                        if text:
+                            last_user = text.replace("\n", " ").strip()[:80]
+                if o.get("sessionId"):
+                    sid = str(o["sessionId"]) or sid
+    except OSError:
+        return None
+
+    title = custom or ai or ""
+    try:
+        nbytes = path.stat().st_size
+    except OSError:
+        nbytes = 0
+    return {
+        "store": "claude",
+        "id": sid,
+        "title": title or "(untitled)",
+        "ts": iso_from_iso_or_file(last_ts, path),
+        "branch": branch,
+        "cwd": cwd,
+        "source_path": str(path),
+        "bytes": nbytes,
+        "preview": title or last_user,
+        "mode": "",
+    }
+
+
+def list_claude(toplevel: Path, main_only: bool, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for d in claude_project_dirs(toplevel, main_only):
+        for p in d.glob("*.jsonl"):
+            if not p.is_file():
+                continue
+            # top-level only (sidechains live under <uuid>/subagents/)
+            row = parse_claude_session(p)
+            if row:
+                rows.append(row)
+    rows.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    return rows[:limit]
+
+
+# --- Cursor -----------------------------------------------------------------
+
+
+def cursor_support_root() -> Path:
+    return Path.home() / "Library" / "Application Support" / "Cursor" / "User"
+
+
+def find_workspace_hashes(toplevel: Path) -> list[str]:
+    ws_root = cursor_support_root() / "workspaceStorage"
+    if not ws_root.is_dir():
+        return []
+    top = str(toplevel)
+    hashes: list[str] = []
+    for d in ws_root.iterdir():
+        if not d.is_dir():
+            continue
+        wj = d / "workspace.json"
+        if not wj.is_file():
+            continue
+        try:
+            data = json.loads(wj.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        folder = data.get("folder") or ""
+        if not isinstance(folder, str) or not folder:
+            continue
+        # file:///path or vscode-remote://...
+        path = folder
+        if folder.startswith("file:"):
+            path = unquote(urlparse(folder).path)
+        else:
+            # try decode anyway
+            path = unquote(folder.split("file:", 1)[-1] if "file:" in folder else folder)
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            continue
+        if resolved == top or resolved.startswith(top + os.sep):
+            hashes.append(d.name)
+    return hashes
+
+
+def open_cursor_db_readonly() -> sqlite3.Connection | None:
+    db = cursor_support_root() / "globalStorage" / "state.vscdb"
+    if not db.is_file():
+        return None
+    # Prefer a copy when WAL exists (Cursor may hold locks)
+    wal = Path(str(db) + "-wal")
+    target = db
+    tmp: Path | None = None
+    if wal.is_file():
+        try:
+            fd, name = tempfile.mkstemp(prefix="cursor-state-", suffix=".vscdb")
+            os.close(fd)
+            tmp = Path(name)
+            tmp.write_bytes(db.read_bytes())
+            # best-effort copy wal/shm too (optional)
+            for suf in ("-wal", "-shm"):
+                src = Path(str(db) + suf)
+                if src.is_file():
+                    Path(str(tmp) + suf).write_bytes(src.read_bytes())
+            target = tmp
+        except OSError:
+            target = db
+            tmp = None
+    try:
+        uri = f"file:{target}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as e:
+        if tmp:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        die(f"error: cannot open Cursor DB: {e}")
+
+
+def list_cursor(toplevel: Path, limit: int) -> list[dict[str, Any]]:
+    hashes = set(find_workspace_hashes(toplevel))
+    if not hashes:
+        return []
+    conn = open_cursor_db_readonly()
+    if conn is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        # Prefer composerHeaders table when present
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "composerHeaders" in tables:
+            q = (
+                "SELECT composerId, workspaceId, createdAt, lastUpdatedAt, "
+                "isArchived, isSubagent, recency, value FROM composerHeaders "
+                "WHERE isSubagent = 0 OR isSubagent IS NULL"
+            )
+            for r in conn.execute(q):
+                wid = r["workspaceId"] or ""
+                if wid not in hashes:
+                    continue
+                if r["isArchived"]:
+                    continue
+                title = ""
+                mode = ""
+                try:
+                    val = json.loads(r["value"] or "{}")
+                    title = str(val.get("name") or "")
+                    mode = str(val.get("unifiedMode") or "")
+                except json.JSONDecodeError:
+                    pass
+                ts_ms = r["lastUpdatedAt"] or r["recency"] or r["createdAt"]
+                rows.append(
+                    {
+                        "store": "cursor",
+                        "id": r["composerId"],
+                        "title": title or "(untitled)",
+                        "ts": iso_from_ms(ts_ms),
+                        "branch": "",
+                        "cwd": str(toplevel),
+                        "source_path": f"composerHeaders:{r['composerId']}",
+                        "bytes": 0,
+                        "preview": title,
+                        "mode": mode,
+                        "workspace": wid,
+                    }
+                )
+        else:
+            # Legacy: scan cursorDiskKV composerData:*
+            for r in conn.execute(
+                "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
+            ):
+                try:
+                    val = json.loads(r["value"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if val.get("isSubagent"):
+                    continue
+                wi = val.get("workspaceIdentifier") or {}
+                wid = wi.get("id") if isinstance(wi, dict) else None
+                if wid not in hashes:
+                    continue
+                cid = val.get("composerId") or str(r["key"]).split(":", 1)[-1]
+                ts_ms = val.get("lastUpdatedAt") or val.get("createdAt")
+                rows.append(
+                    {
+                        "store": "cursor",
+                        "id": cid,
+                        "title": str(val.get("name") or "(untitled)"),
+                        "ts": iso_from_ms(ts_ms),
+                        "branch": "",
+                        "cwd": str(toplevel),
+                        "source_path": f"composerData:{cid}",
+                        "bytes": 0,
+                        "preview": str(val.get("name") or ""),
+                        "mode": str(val.get("unifiedMode") or ""),
+                        "workspace": wid or "",
+                    }
+                )
+    finally:
+        conn.close()
+
+    rows.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    return rows[:limit]
+
+
+# --- Resolve / output -------------------------------------------------------
+
+
+def match_query(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    q = query.strip().lower()
+    if not q:
+        return []
+    exact = [
+        r
+        for r in rows
+        if (r.get("title") or "").lower() == q or (r.get("id") or "").lower() == q
+    ]
+    if exact:
+        return exact
+    # slug-ish: compare kebab of title
+    def slugify(s: str) -> str:
+        out = []
+        prev_dash = False
+        for ch in s.lower():
+            if ch.isalnum():
+                out.append(ch)
+                prev_dash = False
+            else:
+                if not prev_dash:
+                    out.append("-")
+                    prev_dash = True
+        return "".join(out).strip("-")
+
+    qslug = slugify(q)
+    exact_slug = [r for r in rows if slugify(r.get("title") or "") == qslug]
+    if exact_slug:
+        return exact_slug
+    return [r for r in rows if q in (r.get("title") or "").lower() or q in (r.get("id") or "").lower()]
+
+
+def match_id(rows: list[dict[str, Any]], sid: str) -> list[dict[str, Any]]:
+    sid = sid.strip().lower()
+    hits = [r for r in rows if (r.get("id") or "").lower() == sid]
+    if hits:
+        return hits
+    # prefix / short id
+    return [r for r in rows if (r.get("id") or "").lower().startswith(sid)]
+
+
+def emit(rows: list[dict[str, Any]], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(rows, indent=2))
+        return
+    for r in rows:
+        id8 = (r.get("id") or "")[:8]
+        mid = r.get("mode") or r.get("branch") or "-"
+        loc = r.get("cwd") or r.get("workspace") or "-"
+        if len(loc) > 48:
+            loc = "…" + loc[-47:]
+        print(
+            f"{r.get('title') or '(untitled)'} | {id8} | {r.get('ts') or '-'} | {mid} | {loc}"
+        )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--from", dest="store", required=True, choices=("claude", "cursor"))
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--main-only", action="store_true", help="Claude: skip $slug--* worktrees")
+    ap.add_argument("--limit", type=int, default=50)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--json", action="store_true")
+    p_list.add_argument("--main-only", action="store_true")
+    p_list.add_argument("--limit", type=int, default=None)
+
+    p_res = sub.add_parser("resolve")
+    p_res.add_argument("query", nargs="?", default="")
+    p_res.add_argument("--id", dest="session_id", default="")
+    p_res.add_argument("--json", action="store_true")
+
+    args = ap.parse_args()
+    # Prefer subcommand flags when set
+    as_json = bool(getattr(args, "json", False))
+    main_only = bool(getattr(args, "main_only", False))
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = 50
+    limit = max(1, int(limit))
+
+    toplevel = git_toplevel()
+
+    if args.store == "claude":
+        rows = list_claude(toplevel, main_only, limit if args.cmd == "list" else 10_000)
+    else:
+        if sys.platform != "darwin":
+            print(
+                "warn: Cursor store mapping documented for macOS; attempting anyway",
+                file=sys.stderr,
+            )
+        rows = list_cursor(toplevel, limit if args.cmd == "list" else 10_000)
+
+    if args.cmd == "list":
+        emit(rows[:limit], as_json)
+        raise SystemExit(0)
+
+    # resolve
+    if args.session_id:
+        hits = match_id(rows, args.session_id)
+    elif args.query:
+        hits = match_query(rows, args.query)
+    else:
+        die("error: resolve needs <query> or --id <id>")
+
+    if len(hits) == 0:
+        emit([], as_json)
+        raise SystemExit(2)
+    if len(hits) > 1:
+        emit(hits[:limit], as_json)
+        raise SystemExit(3)
+    emit(hits, as_json)
+    raise SystemExit(0)
+
+
+if __name__ == "__main__":
+    main()

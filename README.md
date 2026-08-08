@@ -28,7 +28,7 @@ Or copy folders from [`skills/`](./skills/) into your agent skills directory:
 
 | Skill | What it solves | Keywords |
 |---|---|---|
-| **[dual-tool-handoff](./skills/dual-tool-handoff/SKILL.md)** | Claude Code ↔ Cursor session handoff when chats don’t sync cross-platform; Diff check warns if `shipped` ≠ tree | `claude code cursor handoff`, `switch tools`, `named session` |
+| **[dual-tool-handoff](./skills/dual-tool-handoff/SKILL.md)** | Claude Code ↔ Cursor handoff + fetch/hydrate from the other tool’s local store; Diff check warns if `shipped` ≠ tree | `claude code cursor handoff`, `fetch session`, `named session` |
 | **[render-check](./skills/render-check/SKILL.md)** | Prove a UI fix actually rendered (served HTML/CSS, not just source) | `fast refresh`, `next.js`, `tailwind`, `stale build` |
 | **[agent-design](./skills/agent-design/SKILL.md)** | Design LLM agents with a decision map + Task · Context · Memory · Eval | `agent design`, `eval`, `singular outcome` |
 
@@ -38,7 +38,7 @@ Or copy folders from [`skills/`](./skills/) into your agent skills directory:
 
 Hit a Claude Max / plan limit mid-refactor, switch to Cursor — blank chat, context gone. Pasting is lossy.
 
-**Fix:** [`/dual-tool-handoff`](./skills/dual-tool-handoff/SKILL.md) — named handoff file in the repo; resume the same session name on the other tool. Switch-only (not live sync). Includes **Diff check**: git paths vs agent `shipped` narrative (warn ≠ block; Diff ≠ why).
+**Fix:** [`/dual-tool-handoff`](./skills/dual-tool-handoff/SKILL.md) — named handoff file in the repo; resume the same session name on the other tool. If you forgot to hand off, **fetch/hydrate** from the other tool’s local store (confirm first). Switch-only (not live sync). Includes **Diff check**: git paths vs agent `shipped` narrative (warn ≠ block; Diff ≠ why).
 
 ### The agent said the UI was fixed. The screen didn’t change.
 
@@ -59,6 +59,7 @@ Flaky agents often wrap multiple outcomes and skip eval.
 2. Pick a session name (or continue an existing one)
 3. Skill writes .scratch/handoffs/<slug>.md
 4. In Cursor: “resume <that name>”
+   — or, if you forgot step 1: “fetch <name> from Claude”
 ```
 
 The session isn’t the source of truth. The repo file is.

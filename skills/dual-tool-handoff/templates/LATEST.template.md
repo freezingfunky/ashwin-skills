@@ -10,6 +10,8 @@
 - **Worktree:** main checkout | path
 - **Ticket:** path or n/a
 - **Spec:** path or n/a
+- **Claude session id:** uuid or n/a
+- **Cursor session id:** composerId or n/a
 
 ## What shipped
 
